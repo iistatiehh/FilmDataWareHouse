@@ -24,139 +24,77 @@ engine = create_engine(
 
 import traceback
 
-def extract_payment(**kwargs):
-    try:
-        print("🔄 Connecting to database for payment extraction...")
-        query = """
-        SELECT 
-            p.payment_id,
-            p.staff_id,
-            p.rental_id,
-            r.inventory_id,          
-            DATE(p.payment_date) AS payment_date,
-            p.amount,
-            s.first_name,
-            s.last_name,
-            r.rental_date,
-            r.customer_id,
-            s.store_id
-        FROM payment p
-        JOIN staff s ON p.staff_id = s.staff_id
-        JOIN rental r ON p.rental_id = r.rental_id
-        """
-        df = pd.read_sql(query, engine)
-        print(f"✅ Retrieved {len(df)} payment records.")
-        
-        output_path = '/tmp/extracted_pay.csv'
-        df.to_csv(output_path, index=False)
-        print(f"📁 Payment data written to {output_path}")
-        
-    except Exception as e:
-        print("❌ Error in extract_payment:")
-        traceback.print_exc()
-        raise AirflowFailException(f"extract_payment failed due to: {str(e)}")
-
-
-def extract_inventory(**kwargs):
-    try:
-        print("🔄 Connecting to database for inventory extraction...")
-        query = """
-        SELECT 
-            i.inventory_id,
-            i.film_id,
-            f.title,
-            i.store_id,
-            s.address_id,
-            s.manager_staff_id,
-            a.address,
-            f.release_year,
-            f.language_id,
-            i.last_update
-        FROM inventory i
-        JOIN film f ON i.film_id = f.film_id
-        JOIN store s ON i.store_id = s.store_id
-        JOIN address a ON s.address_id = a.address_id
-        """
-        df = pd.read_sql(query, engine)
-        df = df.drop_duplicates().dropna()
-        print(f"Retrieved and cleaned {len(df)} inventory records.")
-        
-        output_path = '/tmp/extracted_inventory.csv'
-        df.to_csv(output_path, index=False)
-        print(f"Inventory data written to {output_path}")
-        
-    except Exception as e:
-        print("Error in extract_inventory:", e)
-        raise AirflowFailException(f"extract_inventory failed: {str(e)}")
-
-
-def transform_pay(**kwargs):
-    df = pd.read_csv('/tmp/extracted_pay.csv').dropna()
-    df['payment_date'] = pd.to_datetime(df['payment_date'])
-    df['year'] = df['payment_date'].dt.year
-    df['month'] = df['payment_date'].dt.month
-    df['day'] = df['payment_date'].dt.day
-    df.to_csv('/tmp/transformed_pay.csv', index=False)
-
-def transform_inv(**kwargs):
-    df = pd.read_csv('/tmp/extracted_inventory.csv')
-    df.drop_duplicates().dropna().to_csv('/tmp/transformed_inv.csv', index=False)
+def clean_dataframe(df, table_name=None):
+    original_shape = df.shape
+    df = df.dropna().drop_duplicates()
+    cleaned_shape = df.shape
+    if table_name:
+        print(f"[{table_name}] Cleaned: {original_shape[0] - cleaned_shape[0]} rows removed")
+    return df
 
 def load_dim_staff(**kwargs):
-    df = pd.read_csv('/tmp/transformed_pay.csv')
-    df[["staff_id", "first_name", "last_name", "store_id"]].drop_duplicates()\
-        .to_sql('dim_staff', con=engine, if_exists='append', index=False)
+    query = "SELECT staff_id, first_name, last_name, store_id FROM staff"
+    df = pd.read_sql(query, engine)
+    df = clean_dataframe(df, 'dim_staff')
+    df.to_sql('dim_staff', engine, if_exists='append', index=False)
 
-def load_dim_date(**kwargs):
-    df = pd.read_csv('/tmp/transformed_pay.csv')
-    df = df.dropna(subset=['payment_date'])
-    df['date_id'] = pd.to_datetime(df['payment_date']).dt.strftime('%Y%m%d').astype(int)
-    dim_date = df[['date_id', 'payment_date', 'month', 'year']]\
-        .drop_duplicates().rename(columns={'payment_date': 'full_date'})
-    dim_date.to_sql('dim_date', con=engine, if_exists='append', index=False)
 
 def load_dim_film(**kwargs):
-    df = pd.read_csv('/tmp/transformed_inv.csv')
-    df[['film_id', 'title', 'release_year', 'language_id']].drop_duplicates()\
-        .to_sql('dim_film', con=engine, if_exists='append', index=False)
+    query = "SELECT film_id, title, release_year, language_id FROM film"
+    df = pd.read_sql(query, engine)
+    df = clean_dataframe(df, 'dim_film')
+    df.to_sql('dim_film', engine, if_exists='append', index=False)
+
 
 def load_dim_store(**kwargs):
-    df = pd.read_csv('/tmp/transformed_inv.csv')
-    df[['store_id', 'manager_staff_id', 'address_id']].drop_duplicates()\
-        .to_sql('dim_store', con=engine, if_exists='append', index=False)
+    query = "SELECT store_id, manager_staff_id, address_id FROM store"
+    df = pd.read_sql(query, engine)
+    df = clean_dataframe(df, 'dim_store')
+    df.to_sql('dim_store', engine, if_exists='append', index=False)
+
+
+def load_dim_date(**kwargs):
+    date_range = pd.date_range(start='2005-01-01', end='2006-12-31', freq='D')
+    df = pd.DataFrame({
+        'date_id': date_range.strftime('%Y%m%d').astype(int),
+        'full_date': date_range,
+        'month': date_range.month,
+        'year': date_range.year,
+    })
+    df = clean_dataframe(df, 'dim_date')
+    df.to_sql('dim_date', engine, if_exists='append', index=False)
+
 
 def load_dim_rental(**kwargs):
-    df = pd.read_csv('/tmp/transformed_pay.csv')
-    df[["rental_id", "rental_date", "inventory_id", "customer_id"]].drop_duplicates()\
-        .to_sql('dim_rental', con=engine, if_exists='append', index=False)
-    
-def load_fact_inventory(**kwargs):
-    df_inventory = pd.read_csv('/tmp/transformed_inv.csv')
-    df_inventory['last_update'] = pd.to_datetime(df_inventory['last_update']).dt.date
+    query = "SELECT rental_id, rental_date, inventory_id, customer_id FROM rental"
+    df = pd.read_sql(query, engine)
+    df = clean_dataframe(df, 'dim_rental')
+    df.to_sql('dim_rental', engine, if_exists='append', index=False)
 
-    dim_date = pd.read_sql("SELECT date_id, full_date FROM dim_date", engine)
-    dim_date['full_date'] = pd.to_datetime(dim_date['full_date']).dt.date
 
-    df_inventory = df_inventory.merge(dim_date, left_on='last_update', right_on='full_date', how='left')
-    fact_inventory = df_inventory[['date_id', 'film_id', 'store_id']]
-    fact_inventory.to_sql('fact_daily_inventory', con=engine, if_exists='append', index=False)
+def load_fact_daily_inventory(**kwargs):
+    rental_df = pd.read_sql("SELECT rental_id, rental_date, inventory_id FROM rental", engine)
+    inventory_df = pd.read_sql("SELECT inventory_id, film_id, store_id FROM inventory", engine)
+
+    merged = rental_df.merge(inventory_df, on='inventory_id', how='inner')
+    merged['date_id'] = pd.to_datetime(merged['rental_date']).dt.strftime('%Y%m%d').astype(int)
+
+    grouped = merged.groupby(['date_id', 'film_id', 'store_id']).size().reset_index(name='inventory_count')
+    grouped = clean_dataframe(grouped, 'fact_daily_inventory')
+    grouped.to_sql('fact_daily_inventory', engine, if_exists='append', index=False)
 
 
 def load_fact_monthly_payment(**kwargs):
-    df = pd.read_csv('/tmp/transformed_pay.csv')
-    df['payment_date'] = pd.to_datetime(df['payment_date'])
-    df['year'] = df['payment_date'].dt.year
-    df['month'] = df['payment_date'].dt.month
+    payments = pd.read_sql("SELECT staff_id, rental_id, payment_date, amount FROM payment", engine)
+    payments['payment_date'] = pd.to_datetime(payments['payment_date'])
+    payments['year'] = payments['payment_date'].dt.year
+    payments['month'] = payments['payment_date'].dt.month
+    payments['date_id'] = (payments['year'] * 10000 + payments['month'] * 100 + 1).astype(int)
 
-    monthly_agg = df.groupby(['staff_id', 'rental_id', 'year', 'month'], as_index=False)['amount'].sum()
-    monthly_agg.rename(columns={'amount': 'monthly_payment_total'}, inplace=True)
-
-    dim_date = pd.read_sql("SELECT date_id, year, month FROM dim_date", engine)
-    fact = pd.merge(monthly_agg, dim_date, on=['year', 'month'], how='left')
-    fact = fact[['staff_id', 'rental_id', 'date_id', 'monthly_payment_total']]
-    fact.to_sql('fact_monthly_payment', con=engine, if_exists='append', index=False)
-    
-
+    grouped = payments.groupby(['staff_id', 'rental_id', 'date_id'])['amount'].sum().reset_index()
+    grouped.rename(columns={'amount': 'monthly_payment_total'}, inplace=True)
+    grouped = clean_dataframe(grouped, 'fact_monthly_payment')
+    grouped.to_sql('fact_monthly_payment', engine, if_exists='append', index=False)
 # ----------- DAG Definition ---------------- #
 default_args = {
     'owner': 'airflow',
@@ -166,6 +104,7 @@ default_args = {
     'retry_delay': timedelta(minutes=5),
 }
 
+# Updated DAG structure remains the same
 with DAG(
     dag_id='etl_dimensional_model',
     default_args=default_args,
@@ -177,26 +116,6 @@ with DAG(
     start_task = BashOperator(
         task_id='first_task',
         bash_command="echo hello!!!!!"
-    )
-
-    extract_payment_task = PythonOperator(
-        task_id='extract_payment',
-        python_callable=extract_payment,
-    )
-
-    extract_inventory_task = PythonOperator(
-        task_id='extract_inventory',
-        python_callable=extract_inventory,
-    )
-
-    transform_pay_task = PythonOperator(
-        task_id='transform_pay',
-        python_callable=transform_pay,
-    )
-
-    transform_inv_task = PythonOperator(
-        task_id='transform_inventory',
-        python_callable=transform_inv,
     )
 
     load_dim_staff_task = PythonOperator(
@@ -223,9 +142,10 @@ with DAG(
         task_id='load_dim_rental',
         python_callable=load_dim_rental,
     )
+    
     load_fact_inventory_task = PythonOperator(
         task_id='load_fact_inventory',
-        python_callable=load_fact_inventory,
+        python_callable=load_fact_daily_inventory,
     )
 
     load_fact_monthly_payment_task = PythonOperator(
@@ -233,28 +153,18 @@ with DAG(
         python_callable=load_fact_monthly_payment,
     )
 
+    # Task dependencies
+    
+ 
+    # Load dimensions first
+   
+    
+    # Load facts after dimensions are loaded
+    [load_dim_staff_task, load_dim_date_task, load_dim_rental_task] >> load_fact_monthly_payment_task
+    [load_dim_film_task, load_dim_store_task, load_dim_date_task] >> load_fact_inventory_task
 
-with DAG(
-    dag_id='test_mysql_connection',
-    start_date=datetime(2025, 1, 1),
-    schedule_interval=None,
-    catchup=False,
-) as dag:
 
-    test_query = MySqlOperator(
-        task_id='run_test_query',
-        mysql_conn_id='mysql_conn',  # Your connection ID here
-        sql='SELECT 1;',  # Simple query to test connection
-    )
-    # ----------- Dependencies ---------------- #
-    start_task >> [extract_payment_task, extract_inventory_task]
 
-extract_payment_task >> transform_pay_task
-extract_inventory_task >> transform_inv_task
 
-transform_pay_task >> [load_dim_staff_task, load_dim_date_task, load_dim_rental_task]
-transform_inv_task >> [load_dim_film_task, load_dim_store_task]
 
-# Fact table dependencies
-[load_dim_date_task, load_dim_film_task, load_dim_store_task] >> load_fact_inventory_task
-[load_dim_date_task, load_dim_rental_task, load_dim_staff_task] >> load_fact_monthly_payment_task
+
